@@ -102,150 +102,11 @@ def parse_answer(raw: str) -> str | None:
 
 ## TẦNG 2 — NEIGHBOR EXPANSION (small-to-big, ~10 phút code)
 
-**Tại sao:** đáp án hay bị cắt đôi giữa 2 chunk. Search bằng chunk nhỏ (chính xác) nhưng đưa vào prompt cả chunk liền trước + liền sau của chunk trúng (đủ ngữ cảnh).
-
-**Sửa `rag.py` — THAY TOÀN BỘ hàm `search` trong class VectorStore bằng 2 hàm:**
-```python
-    def _all_scores(self, query: str):
-        n = len(self.chunks)
-        scores = np.zeros(n, dtype=np.float32)
-        alpha = config.HYBRID_ALPHA
-        model = get_model()
-        if model is not None and self.emb is not None:
-            is_e5 = "e5" in config.EMBED_MODEL.lower()
-            q_text = ("query: " + query) if is_e5 else query
-            q = model.encode([q_text], normalize_embeddings=True, convert_to_numpy=True)[0]
-            cos = (self.emb @ q + 1) / 2
-            scores += alpha * cos
-        else:
-            alpha = 0.0
-        if self.bm25 is not None:
-            bm = np.array(self.bm25.get_scores(_tokenize(query)), dtype=np.float32)
-            bm = bm - bm.min()
-            if bm.max() > 0:
-                bm = bm / bm.max()
-            scores += (1 - alpha) * bm
-        return scores
-
-    def search(self, query: str, top_k=None, neighbors=1):
-        """Lấy top_k chunk + neighbors chunk liền kề mỗi bên, theo thứ tự văn bản."""
-        if not self.ready:
-            return []
-        top_k = top_k or config.TOP_K
-        scores = self._all_scores(query)
-        n = len(self.chunks)
-        idx = np.argsort(-scores)[:top_k]
-        seen, picked = set(), []
-        for i in idx:
-            for j in range(max(0, i - neighbors), min(n, i + neighbors + 1)):
-                if j not in seen:
-                    seen.add(j)
-                    picked.append(j)
-        picked.sort()   # thứ tự văn bản -> LLM đọc mạch lạc hơn
-        return [(self.chunks[j], float(scores[j])) for j in picked]
-```
-
-**Sửa `config.py`:** `TOP_K = 3` (mỗi hit kéo theo 2 hàng xóm → 3 hit ≈ 7–9 chunk, vừa budget 5500).
 
 **Rollback:** `neighbors=0` ngay trong lời gọi, hoặc trả lại hàm search cũ.
 
----
-
-## TẦNG 3 — RETRIEVAL THEO TỪNG ĐÁP ÁN (~15 phút code)
-
-**Tại sao:** câu "VectorDB nào KHÔNG được nhắc đến?" — search bằng cả câu thì context về option sai mới là cái cần tìm. Search riêng "thân câu hỏi + từng option" rồi cộng dồn điểm sẽ phủ đều 4 hướng.
-
-**Thêm vào `rag.py` (cuối file, ngoài class):**
-```python
-def multi_query_scores(store: VectorStore, question: str):
-    """Cộng dồn điểm từ câu hỏi gốc + từng (thân câu hỏi + option)."""
-    stem_split = re.split(r"\s+(?=A[\.\):])", question, maxsplit=1)
-    stem = stem_split[0]
-    opts = re.findall(r"([A-D])[\.\):\-]\s*(.+?)(?=\s+[A-D][\.\):\-]\s|$)", question, re.S)
-    queries = [question] + [f"{stem} {t.strip()}" for _, t in opts]
-    total = None
-    for q in queries:
-        s = store._all_scores(q)
-        total = s if total is None else total + s
-    return total
-```
-
-**Sửa `server.py` trong handler `/ask`** — thay dòng `results = STORE.search(question)...` bằng:
-```python
-    if STORE.ready:
-        scores = rag.multi_query_scores(STORE, question)
-        import numpy as np
-        n = len(STORE.chunks)
-        idx = np.argsort(-scores)[:config.TOP_K]
-        seen, picked = set(), []
-        for i in idx:
-            for j in range(max(0, i - 1), min(n, i + 2)):   # kèm neighbor tầng 2
-                if j not in seen:
-                    seen.add(j); picked.append(j)
-        picked.sort()
-        results = [(STORE.chunks[j], float(scores[j])) for j in picked]
-    else:
-        results = []
-```
-
-**Chi phí:** 5 lần encode query (~0.5s). **Rollback:** trả lại dòng `STORE.search(question)`.
-
----
 
 ## TẦNG 4 — RERANKER CROSS-ENCODER (mạnh nhất về retrieval, nặng nhất)
-
-**Tại sao:** bi-encoder chấm query và chunk RIÊNG rồi mới so; cross-encoder đọc CẶP (câu hỏi, chunk) cùng lúc → xếp hạng chuẩn hơn hẳn. Luồng: hybrid lấy thô top-20 → rerank → lấy top 4–5.
-
-**Chi phí/rủi ro:** tải thêm `BAAI/bge-reranker-base` ~1.1GB (nhét vào zip-kèm-model!), +1–3s/câu trên CPU.
-
-**Thêm vào `config.py`:**
-```python
-RERANK_MODEL = "BAAI/bge-reranker-base"
-USE_RERANK = True        # tắt nhanh khi cần
-RERANK_CANDIDATES = 20   # số chunk thô đưa vào reranker
-```
-
-**Thêm vào `rag.py` (gần get_model):**
-```python
-_reranker = None
-
-def get_reranker():
-    global _reranker
-    if not getattr(config, "USE_RERANK", False):
-        return None
-    if _reranker is None:
-        try:
-            os.environ.setdefault("HF_HOME", config.MODEL_CACHE_DIR)
-            from sentence_transformers import CrossEncoder
-            _reranker = CrossEncoder(config.RERANK_MODEL, max_length=512)
-            print("[RAG] Reranker sẵn sàng.")
-        except Exception as e:
-            print(f"[RAG] ⚠ Reranker lỗi ({e}) -> bỏ qua rerank.")
-            config.USE_RERANK = False
-    return _reranker
-
-def rerank(question: str, candidates: list[str], top_k: int):
-    rr = get_reranker()
-    if rr is None or not candidates:
-        return candidates[:top_k]
-    scores = rr.predict([(question, c) for c in candidates])
-    order = sorted(range(len(candidates)), key=lambda i: -scores[i])
-    return [candidates[i] for i in order[:top_k]]
-```
-
-**Sửa handler `/ask`:** lấy thô `RERANK_CANDIDATES` chunk (dùng `_all_scores` + argsort), rồi `contexts = rag.rerank(question, raw_chunks, config.TOP_K)` trước khi cắt theo budget.
-
-**Thêm vào `warmup.py` (cuối file):**
-```python
-import os
-os.environ.setdefault("HF_HOME", config.MODEL_CACHE_DIR)
-try:
-    from sentence_transformers import CrossEncoder
-    CrossEncoder(config.RERANK_MODEL, max_length=512)
-    print("✓ Reranker đã tải.")
-except Exception as e:
-    print(f"⚠ Reranker tải lỗi: {e} - không sao, USE_RERANK=False là chạy bình thường.")
-```
 
 **Rollback:** `USE_RERANK = False`.
 
@@ -282,48 +143,12 @@ và áp dụng cho CẢ passage lẫn query khi `"e5" not in EMBED_MODEL` — tr
 
 ---
 
-## THỨ TỰ KHUYÊN LÀM & KỲ VỌNG
-
-1. **Tầng 1 (CoT)** — bắt buộc làm, lãi nhất, gần như không rủi ro.
-2. **Tầng 2 (Neighbor)** — rẻ, sửa đúng bệnh chunk cắt đôi.
-3. **Tầng 4 (Reranker)** — nếu nhét được model vào zip; mạnh nhất về retrieval.
-4. **Tầng 3 (Per-option)** — khi bộ test có nhiều câu phủ định.
-5. **Tầng 5 (Vote)** — chỉ khi proxy nhanh, hôm thi thử đo thử đã.
-
-Đường nào cũng phải qua: **đo trên mock → so điểm sàn → giữ/revert**. Đừng mang vào phòng thi thứ chưa có số liệu.
-
-1. Raw response thiếu dòng "Đáp án: X" (parse phải cứu bằng chữ cái cuối, dễ sai)
-
-→ Siết format bằng ví dụ mẫu, thêm vào cuối SYSTEM_PROMPT:
-Ví dụ trả lời đúng định dạng:
-"Tài liệu nêu rõ X là... nên loại B, C, D.
-Đáp án: A"
-2. Model trả lời theo kiến thức nền, phớt lờ tài liệu (context chứa đáp án rõ ràng mà vẫn chọn khác — hay gặp khi tài liệu thầy có nội dung trái với kiến thức phổ thông)
-
-→ Thay câu đầu SYSTEM_PROMPT:
-Bạn CHỈ được dùng thông tin trong TÀI LIỆU, kể cả khi nó khác với kiến thức của bạn. Tài liệu luôn đúng.
-3. Ngược lại: model trả lời "không đủ thông tin" hoặc lan man không chốt (tài liệu thiếu thật, retrieval miss)
-
-→ Thêm:
-Nếu tài liệu không đề cập, hãy chọn phương án hợp lý nhất theo kiến thức của bạn. LUÔN LUÔN phải chốt một đáp án.
-4. Sai nhiều ở câu phủ định ("KHÔNG", "NGOẠI TRỪ", "SAI là")
-
-→ Thêm:
-Chú ý câu hỏi phủ định (KHÔNG/NGOẠI TRỪ/SAI): khi đó hãy tìm phương án KHÔNG xuất hiện hoặc trái với tài liệu.
-5. Sai ở câu đếm/so sánh số liệu ("gồm mấy bước", "năm nào", "lớn hơn hay nhỏ hơn")
-
-→ Ép liệt kê trước khi chốt:
-Với câu hỏi về số lượng hoặc số liệu: liệt kê ngắn gọn các mục/con số tìm thấy trong tài liệu trước, rồi mới chốt.
-6. Giải thích dài quá, bị cắt cụt trước khi tới "Đáp án:" (raw kết thúc lửng)
-
-→ Hai cách, ưu tiên cách 1: (a) tăng LLM_MAX_TOKENS = 220 trong config; (b) thêm "Giải thích TỐI ĐA 2 câu." vào prompt. Đừng đảo "đáp án trước, giải thích sau" — chốt trước khi lập luận là vứt bỏ tác dụng của CoT.
-7. Hai option na ná nhau, model chọn nhầm cái gần đúng
-
-→ Thêm:
-Nếu có các phương án gần giống nhau, so sánh trực tiếp từng phương án với câu chữ trong tài liệu và chọn cái khớp CHÍNH XÁC nhất.
-8. Model bị lừa bởi context nhiễu (chọn theo chunk lạc đề trong context)
-
-→ Thêm: "Trong TÀI LIỆU có thể lẫn các đoạn không liên quan, hãy bỏ qua chúng." — và đồng thời cân nhắc giảm TOP_K=2 (đây là dấu hiệu retrieval kéo rác vào).
-9. Câu hỏi kiểu "cả A và B đúng" / "tất cả các ý trên"
-
-→ Thêm: "Kể cả khi nhiều ý có vẻ đúng, đáp án vẫn chỉ là MỘT ký tự duy nhất trong A, B, C, D."
+"""Bạn là chuyên gia giải trắc nghiệm dựa trên tài liệu. Quy tắc:
+1. Ưu tiên thông tin trong TÀI LIỆU, phải dựa theo TÀI LIỆU mà trả lời. Tài liệu có thể lẫn đoạn không liên quan - hãy bỏ qua chúng.
+2. Câu hỏi phủ định (KHÔNG / NGOẠI TRỪ / SAI): tìm phương án KHÔNG xuất hiện hoặc trái với tài liệu.
+3. Câu hỏi về số lượng hoặc số liệu: liệt kê ngắn gọn các mục/con số tìm thấy trong tài liệu trước, rồi mới kết luận.
+4. Nếu các phương án gần giống nhau, chọn phương án khớp CHÍNH XÁC nhất với câu chữ trong tài liệu.
+5. Nếu tài liệu không đủ thông tin, suy luận hợp lý nhất và vẫn BẮT BUỘC chọn một đáp án.
+Trả lời: giải thích tối đa 2 câu (KHÔNG lặp lại các lựa chọn), rồi dòng cuối cùng đúng định dạng:
+Đáp án: X
+(X là đúng MỘT ký tự trong A, B, C, D. Ví dụ dòng cuối hợp lệ: "Đáp án: B")"""
