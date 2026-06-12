@@ -39,10 +39,61 @@ def get_model():
 # ------------------------- CHUNKING -------------------------
 _SENT_SPLIT = re.compile(r"(?<=[\.\!\?\n;])\s+")
 
+# Thứ tự ranh giới ưu tiên cho recursive: đoạn văn -> dòng -> câu -> từ
+_SEPARATORS = ["\n\n", "\n", ". ", " "]
+
+
+def _recursive_split(text: str, seps):
+    """Cắt đệ quy: thử ranh giới to nhất trước, mảnh nào còn dài quá
+    CHUNK_SIZE thì đệ quy xuống ranh giới nhỏ hơn."""
+    if len(text) <= config.CHUNK_SIZE:
+        return [text]
+    if not seps:  # hết ranh giới -> cắt cứng
+        return [text[i : i + config.CHUNK_SIZE]
+                for i in range(0, len(text), config.CHUNK_SIZE)]
+    sep, rest = seps[0], seps[1:]
+    parts = text.split(sep)
+    if len(parts) == 1:  # ranh giới này không có trong text -> thử cái nhỏ hơn
+        return _recursive_split(text, rest)
+    pieces = []
+    for p in parts:
+        if len(p) <= config.CHUNK_SIZE:
+            pieces.append(p)
+        else:
+            pieces.extend(_recursive_split(p, rest))
+    return pieces
+
+
+def _chunk_recursive(text: str):
+    """Recursive chunking: tôn trọng cấu trúc đoạn văn tối đa, gộp + overlap."""
+    pieces = [p.strip() for p in _recursive_split(text, _SEPARATORS) if p.strip()]
+    chunks, cur = [], ""
+    for p in pieces:
+        if len(cur) + len(p) + 1 <= config.CHUNK_SIZE:
+            cur = (cur + " " + p).strip()
+        else:
+            if cur:
+                chunks.append(cur)
+            tail = cur[-config.CHUNK_OVERLAP :] if config.CHUNK_OVERLAP > 0 else ""
+            if " " in tail:
+                tail = tail.split(" ", 1)[1]
+            cur = (tail + " " + p).strip()
+    if cur:
+        chunks.append(cur)
+    return [c for c in chunks if len(c) > 20]
+
 
 def chunk_text(text: str):
-    """Cắt theo câu, gộp tới CHUNK_SIZE ký tự, có overlap."""
+    """Dispatch theo config.CHUNK_STRATEGY: "recursive" | "sentence".
+    LƯU Ý: đổi strategy là thay đổi INDEX-TIME -> xóa storage/vectordb.pkl + re-embed."""
     text = text.replace("\r\n", "\n").strip()
+    if getattr(config, "CHUNK_STRATEGY", "sentence") == "recursive":
+        return _chunk_recursive(text)
+    return _chunk_sentence(text)
+
+
+def _chunk_sentence(text: str):
+    """Bản cũ: cắt theo câu, gộp tới CHUNK_SIZE ký tự, có overlap."""
     sents = [s.strip() for s in _SENT_SPLIT.split(text) if s.strip()]
 
     chunks = []
