@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+requests
+openai>=1.0
+numpy
+sentence-transformers
+rank_bm25
