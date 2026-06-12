@@ -291,3 +291,39 @@ và áp dụng cho CẢ passage lẫn query khi `"e5" not in EMBED_MODEL` — tr
 5. **Tầng 5 (Vote)** — chỉ khi proxy nhanh, hôm thi thử đo thử đã.
 
 Đường nào cũng phải qua: **đo trên mock → so điểm sàn → giữ/revert**. Đừng mang vào phòng thi thứ chưa có số liệu.
+
+1. Raw response thiếu dòng "Đáp án: X" (parse phải cứu bằng chữ cái cuối, dễ sai)
+
+→ Siết format bằng ví dụ mẫu, thêm vào cuối SYSTEM_PROMPT:
+Ví dụ trả lời đúng định dạng:
+"Tài liệu nêu rõ X là... nên loại B, C, D.
+Đáp án: A"
+2. Model trả lời theo kiến thức nền, phớt lờ tài liệu (context chứa đáp án rõ ràng mà vẫn chọn khác — hay gặp khi tài liệu thầy có nội dung trái với kiến thức phổ thông)
+
+→ Thay câu đầu SYSTEM_PROMPT:
+Bạn CHỈ được dùng thông tin trong TÀI LIỆU, kể cả khi nó khác với kiến thức của bạn. Tài liệu luôn đúng.
+3. Ngược lại: model trả lời "không đủ thông tin" hoặc lan man không chốt (tài liệu thiếu thật, retrieval miss)
+
+→ Thêm:
+Nếu tài liệu không đề cập, hãy chọn phương án hợp lý nhất theo kiến thức của bạn. LUÔN LUÔN phải chốt một đáp án.
+4. Sai nhiều ở câu phủ định ("KHÔNG", "NGOẠI TRỪ", "SAI là")
+
+→ Thêm:
+Chú ý câu hỏi phủ định (KHÔNG/NGOẠI TRỪ/SAI): khi đó hãy tìm phương án KHÔNG xuất hiện hoặc trái với tài liệu.
+5. Sai ở câu đếm/so sánh số liệu ("gồm mấy bước", "năm nào", "lớn hơn hay nhỏ hơn")
+
+→ Ép liệt kê trước khi chốt:
+Với câu hỏi về số lượng hoặc số liệu: liệt kê ngắn gọn các mục/con số tìm thấy trong tài liệu trước, rồi mới chốt.
+6. Giải thích dài quá, bị cắt cụt trước khi tới "Đáp án:" (raw kết thúc lửng)
+
+→ Hai cách, ưu tiên cách 1: (a) tăng LLM_MAX_TOKENS = 220 trong config; (b) thêm "Giải thích TỐI ĐA 2 câu." vào prompt. Đừng đảo "đáp án trước, giải thích sau" — chốt trước khi lập luận là vứt bỏ tác dụng của CoT.
+7. Hai option na ná nhau, model chọn nhầm cái gần đúng
+
+→ Thêm:
+Nếu có các phương án gần giống nhau, so sánh trực tiếp từng phương án với câu chữ trong tài liệu và chọn cái khớp CHÍNH XÁC nhất.
+8. Model bị lừa bởi context nhiễu (chọn theo chunk lạc đề trong context)
+
+→ Thêm: "Trong TÀI LIỆU có thể lẫn các đoạn không liên quan, hãy bỏ qua chúng." — và đồng thời cân nhắc giảm TOP_K=2 (đây là dấu hiệu retrieval kéo rác vào).
+9. Câu hỏi kiểu "cả A và B đúng" / "tất cả các ý trên"
+
+→ Thêm: "Kể cả khi nhiều ý có vẻ đúng, đáp án vẫn chỉ là MỘT ký tự duy nhất trong A, B, C, D."
