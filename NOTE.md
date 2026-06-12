@@ -5,7 +5,10 @@
 ---
 
 ## 0. TÓM TẮT LUẬT THI (đọc lại cho nhớ)
-
+- git clone https://github.com/<username>/rag-exam.git
+cd rag-exam
+pip install -r requirements.txt
+python warmup.py
 - 10–15 phút đầu **CÒN MẠNG**: clone code, cài thư viện, tải model. Sau đó **CẮT MẠNG**, chỉ gọi được Teacher Server.
 - Thi thật: **100 câu**, mỗi câu quá **60 giây** = 0 điểm câu đó, **tối đa 5 lần nộp** (evaluate). Quá 5 lần điểm cao cũng không tính → **ĐỪNG NỘP BỪA**.
 - Điểm cao nhất trong các lần nộp = điểm chính.
