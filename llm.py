@@ -10,12 +10,24 @@ from openai import OpenAI
 # ║   Nguyên tắc: NGẮN GỌN (tiết kiệm token), RÕ RÀNG,       ║
 # ║   ép trả lời đúng 1 ký tự.                                ║
 # ╚══════════════════════════════════════════════════════════╝
-# TẦNG 1 (CoT): cho LLM giải thích ngắn rồi mới chốt -> ăn câu phủ định/đếm/suy luận.
-SYSTEM_PROMPT = (
-    "Bạn là chuyên gia làm bài trắc nghiệm. Dựa CHỦ YẾU vào TÀI LIỆU. "
-    "Giải thích ngắn gọn 1-2 câu, rồi BẮT BUỘC kết thúc bằng dòng đúng định dạng:\n"
-    "Đáp án: X\n(X là một trong A, B, C, D)"
-)
+# TẦNG 1 (CoT) - PROMPT CHÍNH: bộ quy tắc đánh số, gom các pattern hay sai nhất.
+SYSTEM_PROMPT = """Bạn là chuyên gia giải trắc nghiệm dựa trên tài liệu. Quy tắc:
+1. Ưu tiên thông tin trong TÀI LIỆU, kể cả khi nó khác với kiến thức của bạn. Tài liệu có thể lẫn đoạn không liên quan - hãy bỏ qua chúng.
+2. Câu hỏi phủ định (KHÔNG / NGOẠI TRỪ / SAI): tìm phương án KHÔNG xuất hiện hoặc trái với tài liệu.
+3. Câu hỏi về số lượng hoặc số liệu: liệt kê ngắn gọn các mục/con số tìm thấy trong tài liệu trước, rồi mới kết luận.
+4. Nếu các phương án gần giống nhau, chọn phương án khớp CHÍNH XÁC nhất với câu chữ trong tài liệu.
+5. Nếu tài liệu không đủ thông tin, suy luận hợp lý nhất và vẫn BẮT BUỘC chọn một đáp án.
+Trả lời: giải thích tối đa 2 câu (KHÔNG lặp lại các lựa chọn), rồi dòng cuối cùng đúng định dạng:
+Đáp án: X
+(X là đúng MỘT ký tự trong A, B, C, D. Ví dụ dòng cuối hợp lệ: "Đáp án: B")"""
+
+# PROMPT DỰ PHÒNG (bản tối giản) - nếu prompt chính làm model lú thì
+# comment block trên, bỏ comment block dưới, restart server:
+# SYSTEM_PROMPT = (
+#     "Bạn là chuyên gia làm bài trắc nghiệm. Dựa CHỦ YẾU vào TÀI LIỆU. "
+#     "Giải thích ngắn gọn 1-2 câu, rồi BẮT BUỘC kết thúc bằng dòng đúng định dạng:\n"
+#     "Đáp án: X\n(X là một trong A, B, C, D)"
+# )
 
 USER_TEMPLATE = """### TÀI LIỆU:
 {context}
@@ -98,7 +110,13 @@ def answer_question(question: str, contexts: list[str]) -> tuple[str, str]:
                 ],
             )
             raw = (resp.choices[0].message.content or "").strip()
-            ans = parse_answer(raw)
+            ans = parse_answer(raw)   # parse TRƯỚC khi thêm dòng tokens vào raw
+            try:
+                u = resp.usage
+                if u:
+                    raw += f"\n[TOKENS] prompt={u.prompt_tokens} output={u.completion_tokens} total={u.total_tokens}"
+            except Exception:
+                pass
             if ans:
                 return ans, raw
         except Exception as e:
